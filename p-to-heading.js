@@ -1,94 +1,56 @@
 // migrations/h1-heading-body-to-h1.js
-const cheerio = require("cheerio");
 const he = require("he");
 
 module.exports = function (migration) {
-  const contentTypeId = "heroBannerFullImageBanking"; // <-- confirm this is your Content Type ID
-  const fieldId = "heading"; // <-- confirm this is your field ID for "H1 Heading"
+  const contentTypeId = "heroBannerFullImageBanking"; // <-- verify API identifier
+  const fieldId = "heading"; // <-- verify field id for “H1 Heading”
+
+  let changedCount = 0;
+  let logged = 0;
 
   migration.transformEntries({
     contentType: contentTypeId,
     from: [fieldId],
     to: [fieldId],
 
-    transformEntryForLocale: function (fromFields, locale) {
+    transformEntryForLocale: function (fromFields, locale, ctx) {
       const original = fromFields[fieldId]?.[locale];
-      if (original == null || original === "") return;
-      if (typeof original !== "string") return;
+      if (typeof original !== "string" || original.trim() === "") return;
 
-      let value = original.trim();
+      // decode entities (turn &lt;p&gt; into <p>)
+      const decoded = he.decode(original).trim();
 
-      // 1) If stored as escaped HTML, decode it first
-      if (value.includes("&lt;") || value.includes("&gt;")) {
-        value = he.decode(value);
-      }
-
-      // 2) If plain text (no tags), wrap safely in <h1>
-      const looksLikeHtml = /<\/?[a-z][\s\S]*>/i.test(value);
-      if (!looksLikeHtml) {
-        const wrapped = `<h1>${escapeHtml(value)}</h1>`;
-        if (wrapped !== original) return { [fieldId]: wrapped };
-        return;
-      }
-
-      // 3) Parse HTML
-      const $ = cheerio.load(value, { decodeEntities: false });
-
-      // ✅ FIX: keep ONLY element nodes (tags)
-      const topLevelTags = $.root()
-        .children()
-        .toArray()
-        .filter((node) => node.type === "tag"); // <-- correct
-
-      if (topLevelTags.length === 0) return;
-
-      // Case A: <h1><p>...</p></h1>  -> <h1>...</h1>
-      if (topLevelTags.length === 1 && topLevelTags[0].name === "h1") {
-        const h1 = topLevelTags[0];
-
-        const h1TagChildren = $(h1)
-          .contents()
-          .toArray()
-          .filter((n) => n.type === "tag");
-
-        if (h1TagChildren.length === 1 && h1TagChildren[0].name === "p") {
-          const inner = $(h1TagChildren[0]).html() ?? "";
-          $(h1).html(inner);
-
-          const fixed = $.root().html() ?? "";
-          if (fixed && fixed !== original) return { [fieldId]: fixed };
+      // Only change when the ENTIRE value is wrapped in a single <p>...</p>
+      // Allows attributes on p: <p class="x">...</p>
+      const match = decoded.match(/^\s*<p\b[^>]*>([\s\S]*?)<\/p>\s*$/i);
+      if (!match) {
+        // optional: prove we’re iterating (log first few that don't match)
+        if (logged < 3) {
+          console.log(`[skip] entry=${ctx?.id ?? "unknown"} locale=${locale} value-start=${decoded.slice(0, 60)}`);
+          logged++;
         }
         return;
       }
 
-      // Case B: <p>...</p> -> <h1>...</h1> (preserve inner HTML e.g. <sup>)
-      const first = topLevelTags[0];
+      const inner = match[1]; // preserve EVERYTHING inside (sup, strong, links, etc.)
+      const updated = `<h1>${inner}</h1>`;
 
-      if (first.name === "p") {
-        const inner = $(first).html() ?? "";
-        $(first).replaceWith(`<h1>${inner}</h1>`);
+      // If the stored value is already effectively the updated string, do nothing
+      if (updated === decoded || updated === original.trim()) return;
 
-        const updated = $.root().html() ?? "";
-        if (updated && updated !== original) return { [fieldId]: updated };
-        return;
+      changedCount++;
+      if (logged < 10) {
+        console.log(`[update] entry=${ctx?.id ?? "unknown"} locale=${locale}`);
+        logged++;
       }
 
-      // Already starts with <h1>, do nothing
-      if (first.name === "h1") return;
-
-      // Otherwise leave as-is
-      return;
+      // IMPORTANT: return a string for a Text field
+      return { [fieldId]: updated };
     },
 
     shouldPublish: "preserve",
   });
-};
 
-function escapeHtml(str) {
-  return str
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
+  // This prints once when the migration script is evaluated
+  console.log("Migration loaded. Target:", { contentTypeId, fieldId });
+};
